@@ -1,0 +1,239 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("ENTERPRISE")
+  createdAt DateTime @default(now())
+
+  users              User[]
+  services           Service[]
+  escalationPolicies EscalationPolicy[]
+  onCallSchedules    OnCallSchedule[]
+  incidents          Incident[]
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  email          String       @unique
+  role           String       @default("SRE_ENGINEER") // ADMIN, INCIDENT_COMMANDER, SRE_ENGINEER, VIEWER
+  phone          String?
+  avatarUrl      String?
+  createdAt      DateTime     @default(now())
+
+  commandedIncidents Incident[]      @relation("IncidentCommander")
+  escalationSteps    EscalationStep[]
+  onCallShifts       OnCallShift[]
+  actionItems        ActionItem[]
+
+  @@index([organizationId])
+}
+
+model Service {
+  id                 String       @id @default(cuid())
+  organizationId     String
+  organization       Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name               String
+  slug               String       @unique
+  description        String?
+  tier               String       @default("TIER_1") // TIER_1, TIER_2, TIER_3
+  status             String       @default("OPERATIONAL") // OPERATIONAL, DEGRADED, MAJOR_OUTAGE
+  sloTargetPercent   Float        @default(99.95)
+  errorBudgetPercent Float        @default(99.2)
+  ownerTeam          String       @default("Core Infrastructure")
+  repoUrl            String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  incidents          Incident[]
+  alerts             Alert[]
+  upstreamDeps       ServiceDependency[] @relation("ServiceUpstream")
+  downstreamDeps     ServiceDependency[] @relation("ServiceDownstream")
+
+  @@index([organizationId])
+  @@index([status])
+}
+
+model ServiceDependency {
+  id              String  @id @default(cuid())
+  sourceServiceId String
+  targetServiceId String
+  dependencyType  String  @default("CRITICAL") // CRITICAL, SOFT
+
+  sourceService   Service @relation("ServiceUpstream", fields: [sourceServiceId], references: [id], onDelete: Cascade)
+  targetService   Service @relation("ServiceDownstream", fields: [targetServiceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceServiceId, targetServiceId])
+}
+
+model EscalationPolicy {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  isDefault      Boolean      @default(false)
+  repeatCount    Int          @default(3)
+  createdAt      DateTime     @default(now())
+
+  steps          EscalationStep[]
+  incidents      Incident[]
+
+  @@index([organizationId])
+}
+
+model EscalationStep {
+  id           String           @id @default(cuid())
+  policyId     String
+  policy       EscalationPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  stepOrder    Int
+  delayMinutes Int              @default(5)
+  targetType   String           @default("USER") // USER, SCHEDULE
+  targetUserId String?
+  targetUser   User?            @relation(fields: [targetUserId], references: [id])
+  targetScheduleId String?
+  targetSchedule   OnCallSchedule? @relation(fields: [targetScheduleId], references: [id])
+
+  @@index([policyId])
+}
+
+model OnCallSchedule {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  timezone       String       @default("UTC")
+  rotationType   String       @default("WEEKLY") // WEEKLY, DAILY
+  createdAt      DateTime     @default(now())
+
+  shifts          OnCallShift[]
+  escalationSteps EscalationStep[]
+
+  @@index([organizationId])
+}
+
+model OnCallShift {
+  id         String         @id @default(cuid())
+  scheduleId String
+  schedule   OnCallSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       String         @default("PRIMARY") // PRIMARY, SECONDARY
+  startDate  DateTime
+  endDate    DateTime
+
+  @@index([scheduleId])
+  @@index([userId])
+}
+
+model Incident {
+  id                    String            @id @default(cuid())
+  organizationId        String
+  organization          Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  title                 String
+  description           String?
+  severity              String            @default("P2_MAJOR") // P1_CRITICAL, P2_MAJOR, P3_MODERATE, P4_LOW
+  status                String            @default("TRIGGERED") // TRIGGERED, ACKNOWLEDGED, INVESTIGATING, IDENTIFIED, MONITORING, RESOLVED
+  
+  serviceId             String
+  service               Service           @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  
+  escalationPolicyId    String?
+  escalationPolicy      EscalationPolicy? @relation(fields: [escalationPolicyId], references: [id])
+  
+  commanderId           String?
+  commander             User?             @relation("IncidentCommander", fields: [commanderId], references: [id])
+
+  startedAt             DateTime          @default(now())
+  acknowledgedAt        DateTime?
+  resolvedAt            DateTime?
+  mttaMinutes           Int?
+  mttrMinutes           Int?
+
+  slackChannel          String?
+  zoomMeetingUrl        String?
+  customerImpactSummary String?
+
+  timelineEvents        IncidentTimelineEvent[]
+  alerts                Alert[]
+  postMortem            PostMortem?
+
+  @@index([organizationId])
+  @@index([serviceId])
+  @@index([status])
+  @@index([severity])
+}
+
+model IncidentTimelineEvent {
+  id         String   @id @default(cuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  timestamp  DateTime @default(now())
+  authorName String   @default("System Automated")
+  eventType  String   // STATUS_CHANGE, NOTE, ALERT_LINKED, SEVERITY_CHANGE, ROLE_ASSIGNMENT, RESOLVED
+  message    String
+  metadata   String?  // JSON string for extra fields
+
+  @@index([incidentId])
+}
+
+model Alert {
+  id             String    @id @default(cuid())
+  source         String    // DATADOG, PROMETHEUS, SENTRY, CLOUDWATCH, CUSTOM_WEBHOOK
+  title          String
+  fingerprint    String    // Deduplication hash key
+  status         String    @default("FIRING") // FIRING, RESOLVED
+  severity       String    @default("HIGH") // CRITICAL, HIGH, WARNING, INFO
+  rawPayloadJson String?
+  firedAt        DateTime  @default(now())
+
+  incidentId     String?
+  incident       Incident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  serviceId      String
+  service        Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@index([fingerprint])
+  @@index([serviceId])
+  @@index([incidentId])
+}
+
+model PostMortem {
+  id             String       @id @default(cuid())
+  incidentId     String       @unique
+  incident       Incident     @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  summary        String
+  rootCause      String
+  triggerCause   String
+  fiveWhysJson   String?      // Serialized string array of 5 whys
+  lessonsLearned String?
+  status         String       @default("DRAFT") // DRAFT, PUBLISHED
+  publishedAt    DateTime?
+  createdAt      DateTime     @default(now())
+
+  actionItems    ActionItem[]
+}
+
+model ActionItem {
+  id           String     @id @default(cuid())
+  postMortemId String
+  postMortem   PostMortem @relation(fields: [postMortemId], references: [id], onDelete: Cascade)
+  title        String
+  assigneeId   String?
+  assignee     User?      @relation(fields: [assigneeId], references: [id])
+  status       String     @default("TODO") // TODO, IN_PROGRESS, DONE
+  priority     String     @default("HIGH") // CRITICAL, HIGH, MEDIUM, LOW
+  dueDate      DateTime?
+
+  @@index([postMortemId])
+}
